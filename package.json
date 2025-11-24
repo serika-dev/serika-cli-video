@@ -1,0 +1,41 @@
+{
+  "name": "@serikavideo/serika-cli",
+  "version": "1.0.2",
+  "description": "Watch Serika videos directly from your terminal with ASCII art mode",
+  "main": "index.js",
+  "bin": {
+    "serika-cli": "./index.js"
+  },
+  "keywords": [
+    "serika",
+    "video",
+    "cli",
+    "terminal",
+    "ascii",
+    "player"
+  ],
+  "author": "pikachubolk",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/serika-dev/serika-video.git",
+    "directory": "serika-cli"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "chalk": "^4.1.2",
+    "conf": "^15.0.2",
+    "inquirer": "^8.2.5",
+    "ora": "^5.4.1"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
