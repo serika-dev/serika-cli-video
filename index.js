@@ -5,6 +5,8 @@ import chalk from 'chalk';
 import { spawn } from 'child_process';
 import ora from 'ora';
 import os from 'os';
+import fs from 'fs';
+import path from 'path';
 
 import Conf from 'conf';
 
@@ -13,7 +15,10 @@ const config = new Conf({
   defaults: {
     asciiMode: false,
     asciiWidth: 80,
-    asciiCharset: 'standard'
+    asciiCharset: 'standard',
+    downloadDir: '.',
+    downloadQuality: 'original',
+    autoMergeAudio: true
   }
 });
 
@@ -190,6 +195,156 @@ function playVideoAscii(url) {
   });
 }
 
+async function downloadVideo(videoUrl, audioUrl, title) {
+  // Sanitize filename
+  const sanitizedTitle = title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+  const filename = `${sanitizedTitle}.mp4`;
+  
+  // Get download directory from config, expand ~ to home directory
+  let downloadDir = config.get('downloadDir');
+  if (downloadDir.startsWith('~')) {
+    downloadDir = path.join(os.homedir(), downloadDir.slice(1));
+  }
+  
+  // Create directory if it doesn't exist
+  if (!fs.existsSync(downloadDir)) {
+    fs.mkdirSync(downloadDir, { recursive: true });
+  }
+  
+  const downloadPath = path.join(downloadDir, filename);
+
+  const spinner = ora(`Downloading: ${title}`).start();
+
+  // If we have separate audio and video URLs (DASH), use ffmpeg to merge
+  if (audioUrl && audioUrl !== videoUrl && config.get('autoMergeAudio')) {
+    const ffmpegCmd = isWindows ? 'ffmpeg.exe' : 'ffmpeg';
+    const quality = config.get('downloadQuality');
+    
+    return new Promise((resolve, reject) => {
+      const args = [
+        '-i', videoUrl,
+        '-i', audioUrl
+      ];
+      
+      // Add encoding options based on quality setting
+      if (quality === 'original') {
+        args.push('-c', 'copy');
+      } else if (quality === 'high') {
+        args.push('-c:v', 'libx264', '-crf', '18', '-c:a', 'aac', '-b:a', '192k');
+      } else if (quality === 'medium') {
+        args.push('-c:v', 'libx264', '-crf', '23', '-c:a', 'aac', '-b:a', '128k');
+      } else if (quality === 'low') {
+        args.push('-c:v', 'libx264', '-crf', '28', '-c:a', 'aac', '-b:a', '96k');
+      }
+      
+      args.push('-y', downloadPath);
+      
+      const ffmpeg = spawn(ffmpegCmd, args, {
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+      let lastProgress = 0;
+      
+      ffmpeg.stderr.on('data', (data) => {
+        const output = data.toString();
+        // Parse ffmpeg progress output
+        const timeMatch = output.match(/time=(\d+):(\d+):(\d+)/);
+        if (timeMatch) {
+          const hours = parseInt(timeMatch[1]);
+          const minutes = parseInt(timeMatch[2]);
+          const seconds = parseInt(timeMatch[3]);
+          const totalSeconds = hours * 3600 + minutes * 60 + seconds;
+          
+          // Update every 5 seconds to avoid spam
+          if (totalSeconds > lastProgress + 5) {
+            lastProgress = totalSeconds;
+            spinner.text = `Downloading: ${title} (${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s)`;
+          }
+        }
+      });
+
+      ffmpeg.on('error', (err) => {
+        if (err.code === 'ENOENT') {
+          spinner.fail(chalk.red('ffmpeg not found'));
+          console.log(chalk.yellow('Please install ffmpeg to download videos with audio.'));
+          if (isWindows) {
+            console.log(chalk.yellow('Install via: winget install ffmpeg or choco install ffmpeg'));
+          }
+        } else {
+          spinner.fail(chalk.red('Download failed'));
+          console.error(chalk.red(err.message));
+        }
+        // Clean up partial file
+        if (fs.existsSync(downloadPath)) {
+          fs.unlinkSync(downloadPath);
+        }
+        reject(err);
+      });
+
+      ffmpeg.on('close', (code) => {
+        if (code === 0) {
+          spinner.succeed(chalk.green(`Downloaded: ${filename}`));
+          console.log(chalk.gray(`Saved to: ${downloadPath}`));
+          resolve();
+        } else {
+          spinner.fail(chalk.red('Download failed'));
+          // Clean up partial file
+          if (fs.existsSync(downloadPath)) {
+            fs.unlinkSync(downloadPath);
+          }
+          reject(new Error(`ffmpeg exited with code ${code}`));
+        }
+      });
+    });
+  }
+
+  // Single URL download (simple streaming)
+  try {
+    const response = await axios({
+      method: 'GET',
+      url: videoUrl,
+      responseType: 'stream'
+    });
+
+    const totalSize = parseInt(response.headers['content-length'], 10);
+    let downloadedSize = 0;
+
+    const writer = fs.createWriteStream(downloadPath);
+
+    response.data.on('data', (chunk) => {
+      downloadedSize += chunk.length;
+      if (totalSize) {
+        const percent = Math.round((downloadedSize / totalSize) * 100);
+        spinner.text = `Downloading: ${title} (${percent}%)`;
+      }
+    });
+
+    response.data.pipe(writer);
+
+    return new Promise((resolve, reject) => {
+      writer.on('finish', () => {
+        spinner.succeed(chalk.green(`Downloaded: ${filename}`));
+        console.log(chalk.gray(`Saved to: ${downloadPath}`));
+        resolve();
+      });
+
+      writer.on('error', (err) => {
+        spinner.fail(chalk.red('Download failed'));
+        console.error(chalk.red(err.message));
+        // Clean up partial file
+        if (fs.existsSync(downloadPath)) {
+          fs.unlinkSync(downloadPath);
+        }
+        reject(err);
+      });
+    });
+  } catch (error) {
+    spinner.fail(chalk.red('Download failed'));
+    console.error(chalk.red(error.message));
+    throw error;
+  }
+}
+
 async function settingsMenu() {
   while (true) {
     const answers = await inquirer.prompt([
@@ -201,6 +356,10 @@ async function settingsMenu() {
           { name: `ASCII Mode: ${config.get('asciiMode') ? chalk.green('ON') : chalk.red('OFF')}`, value: 'asciiMode' },
           { name: `ASCII Width: ${config.get('asciiWidth')}`, value: 'asciiWidth' },
           { name: `ASCII Charset: ${config.get('asciiCharset')}`, value: 'asciiCharset' },
+          new inquirer.Separator(),
+          { name: `Download Directory: ${config.get('downloadDir')}`, value: 'downloadDir' },
+          { name: `Download Quality: ${config.get('downloadQuality')}`, value: 'downloadQuality' },
+          { name: `Auto-merge Audio: ${config.get('autoMergeAudio') ? chalk.green('ON') : chalk.red('OFF')}`, value: 'autoMergeAudio' },
           new inquirer.Separator(),
           { name: 'Back', value: 'back' }
         ]
@@ -232,6 +391,34 @@ async function settingsMenu() {
         }
       ]);
       config.set('asciiCharset', charset);
+    } else if (answers.setting === 'downloadDir') {
+      const { dir } = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'dir',
+          message: 'Enter download directory path (use . for current, ~ for home):',
+          default: config.get('downloadDir')
+        }
+      ]);
+      config.set('downloadDir', dir);
+    } else if (answers.setting === 'downloadQuality') {
+      const { quality } = await inquirer.prompt([
+        {
+          type: 'list',
+          name: 'quality',
+          message: 'Select download quality:',
+          choices: [
+            { name: 'Original (no re-encoding, fastest)', value: 'original' },
+            { name: 'High (CRF 18, ~192kbps audio)', value: 'high' },
+            { name: 'Medium (CRF 23, ~128kbps audio)', value: 'medium' },
+            { name: 'Low (CRF 28, ~96kbps audio)', value: 'low' }
+          ],
+          default: config.get('downloadQuality')
+        }
+      ]);
+      config.set('downloadQuality', quality);
+    } else if (answers.setting === 'autoMergeAudio') {
+      config.set('autoMergeAudio', !config.get('autoMergeAudio'));
     }
   }
 }
@@ -318,7 +505,41 @@ async function main() {
       continue;
     }
 
-    await playVideo(playUrl);
+    // Ask user what to do with the video
+    const { videoAction } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'videoAction',
+        message: `What would you like to do with "${video.title}"?`,
+        choices: [
+          { name: 'Play Video', value: 'play' },
+          { name: 'Download Video', value: 'download' },
+          { name: 'Back', value: 'back' }
+        ]
+      }
+    ]);
+
+    if (videoAction === 'back') {
+      continue;
+    }
+
+    if (videoAction === 'download') {
+      if (video.isLive) {
+        console.log(chalk.yellow('Cannot download live videos.'));
+        continue;
+      }
+      
+      try {
+        // Pass both video and audio URLs for DASH videos
+        const videoUrl = video.videoUrl || video.dashUrl;
+        const audioUrl = video.audioUrl || null;
+        await downloadVideo(videoUrl, audioUrl, video.title);
+      } catch (error) {
+        // Error already logged in downloadVideo
+      }
+    } else if (videoAction === 'play') {
+      await playVideo(playUrl);
+    }
   }
 }
 
