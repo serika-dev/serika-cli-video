@@ -1,6 +1,6 @@
 {
   "name": "@serikavideo/serika-cli",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Watch Serika videos directly from your terminal with ASCII art mode",
   "main": "index.js",
   "bin": {

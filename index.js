@@ -102,42 +102,52 @@ function playVideoAscii(url) {
     });
 
     const ffmpegCmd = isWindows ? 'ffmpeg.exe' : 'ffmpeg';
-    const ffmpeg = spawn(ffmpegCmd, [
-      '-re',
+    
+    // On Windows, use different settings for better performance
+    const ffmpegArgs = [
       '-i', url,
-      '-vf', `scale=${width}:${height}`,
+      '-vf', `scale=${width}:${height},fps=15`, // Lower FPS on Windows for stability
       '-f', 'image2pipe',
       '-vcodec', 'rawvideo',
       '-pix_fmt', 'rgb24',
       '-'
-    ], {
-      stdio: ['ignore', 'pipe', 'ignore'] // Ignore stderr to avoid noise
+    ];
+    
+    // Don't use -re flag on Windows to avoid timing issues
+    if (!isWindows) {
+      ffmpegArgs.unshift('-re');
+    }
+    
+    const ffmpeg = spawn(ffmpegCmd, ffmpegArgs, {
+      stdio: ['ignore', 'pipe', 'ignore']
     });
 
     const frameSize = width * height * 3;
     let buffer = Buffer.alloc(0);
     let firstFrame = true;
+    let frameCount = 0;
+    let isProcessing = false;
 
     const charsetName = config.get('asciiCharset');
     const chars = CHARSETS[charsetName] || CHARSETS.standard;
     
-    ffmpeg.stdout.on('data', (chunk) => {
-      buffer = Buffer.concat([buffer, chunk]);
-
-      while (buffer.length >= frameSize) {
-        const frame = buffer.subarray(0, frameSize);
-        buffer = buffer.subarray(frameSize);
-
+    // Pre-allocate output array to avoid string concatenation on Windows
+    const processFrame = (frame) => {
+      if (isProcessing) return; // Skip frame if still processing previous
+      isProcessing = true;
+      
+      setImmediate(() => {
         if (firstFrame) {
           console.clear();
-          // Hide cursor
           process.stdout.write('\x1B[?25l');
           firstFrame = false;
         }
 
-        let output = '\x1B[H'; // Move cursor to home
+        const lines = [];
+        lines.push('\x1B[H'); // Move cursor to home
         
         for (let y = 0; y < height; y++) {
+          let line = '';
           for (let x = 0; x < width; x++) {
             const offset = (y * width + x) * 3;
             const r = frame[offset];
@@ -147,24 +157,32 @@ function playVideoAscii(url) {
             const brightness = (r + g + b) / 3;
             const charIndex = Math.floor((brightness / 255) * (chars.length - 1));
             const char = chars[charIndex];
-
-            // Optimization: Group same-colored chars? 
-            // For now, just print every char with its color.
-            // Using chalk for every char is too slow/verbose for raw output.
-            // Use raw ANSI codes for speed.
-            output += `\x1b[38;2;${r};${g};${b}m${char}`;
+            
+            line += `\x1b[38;2;${r};${g};${b}m${char}`;
           }
-          output += '\n';
+          lines.push(line);
         }
-        output += '\x1b[0m'; // Reset color
-        process.stdout.write(output);
+        lines.push('\x1b[0m');
+        
+        process.stdout.write(lines.join('\n'));
+        isProcessing = false;
+        frameCount++;
+      });
+    };
+    
+    ffmpeg.stdout.on('data', (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+
+      while (buffer.length >= frameSize) {
+        const frame = buffer.subarray(0, frameSize);
+        buffer = buffer.subarray(frameSize);
+        processFrame(frame);
       }
     });
 
     const cleanup = () => {
-      ffmpeg.kill();
-      audioPlayer.kill();
-      // Show cursor again
+      if (ffmpeg && !ffmpeg.killed) ffmpeg.kill();
+      if (audioPlayer && !audioPlayer.killed) audioPlayer.kill();
       process.stdout.write('\x1B[?25h');
       console.clear();
     };
@@ -189,7 +207,6 @@ function playVideoAscii(url) {
     const onSigInt = () => {
       cleanup();
       process.removeListener('SIGINT', onSigInt);
-      // We don't resolve here, ffmpeg close event will handle it
     };
     process.on('SIGINT', onSigInt);
   });
