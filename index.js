@@ -4,6 +4,7 @@ import inquirer from 'inquirer';
 import chalk from 'chalk';
 import { spawn } from 'child_process';
 import ora from 'ora';
+import os from 'os';
 
 import Conf from 'conf';
 
@@ -24,6 +25,7 @@ const CHARSETS = {
 };
 
 const API_URL = 'https://serika.app/api';
+const isWindows = os.platform() === 'win32';
 
 async function fetchVideos() {
   const spinner = ora('Fetching videos from Serika...').start();
@@ -49,11 +51,25 @@ function playVideo(url) {
   console.log(chalk.green(`Playing video: ${url}`));
   console.log(chalk.gray('Press q to quit playback'));
 
-  const player = spawn('ffplay', ['-autoexit', '-hide_banner', url], {
+  // Try ffplay first, fallback to opening in browser on Windows
+  const playerCommand = isWindows ? 'ffplay.exe' : 'ffplay';
+  const player = spawn(playerCommand, ['-autoexit', '-hide_banner', url], {
     stdio: 'inherit'
   });
 
   return new Promise((resolve) => {
+    player.on('error', (err) => {
+      if (isWindows && err.code === 'ENOENT') {
+        console.log(chalk.yellow('\nffplay not found. Opening video in browser...'));
+        // Fallback to opening in default browser on Windows
+        spawn('cmd.exe', ['/c', 'start', url], { detached: true, stdio: 'ignore' });
+        resolve();
+      } else {
+        console.error(chalk.red('Error playing video:', err.message));
+        resolve();
+      }
+    });
+
     player.on('close', () => {
       resolve();
     });
@@ -67,12 +83,21 @@ function playVideoAscii(url) {
     // Height = Width * (9/16) * 0.5
     const height = Math.floor(width * (9 / 16) * 0.55); 
 
+    // Check if Windows Terminal supports ANSI
+    if (isWindows && !process.env.WT_SESSION && !process.env.TERM_PROGRAM) {
+      console.log(chalk.yellow('ASCII mode requires Windows Terminal or a compatible terminal.'));
+      console.log(chalk.yellow('Playing in normal mode instead...'));
+      return playVideo(url);
+    }
+
     // Start audio player in background
-    const audioPlayer = spawn('ffplay', ['-nodisp', '-autoexit', '-hide_banner', url], {
+    const audioPlayerCmd = isWindows ? 'ffplay.exe' : 'ffplay';
+    const audioPlayer = spawn(audioPlayerCmd, ['-nodisp', '-autoexit', '-hide_banner', url], {
       stdio: 'ignore'
     });
 
-    const ffmpeg = spawn('ffmpeg', [
+    const ffmpegCmd = isWindows ? 'ffmpeg.exe' : 'ffmpeg';
+    const ffmpeg = spawn(ffmpegCmd, [
       '-re',
       '-i', url,
       '-vf', `scale=${width}:${height}`,
@@ -134,8 +159,21 @@ function playVideoAscii(url) {
     const cleanup = () => {
       ffmpeg.kill();
       audioPlayer.kill();
+      // Show cursor again
+      process.stdout.write('\x1B[?25h');
       console.clear();
     };
+
+    ffmpeg.on('error', (err) => {
+      if (err.code === 'ENOENT') {
+        console.log(chalk.red(`\n${ffmpegCmd} not found. Please install ffmpeg to use ASCII mode.`));
+        if (isWindows) {
+          console.log(chalk.yellow('Install via: winget install ffmpeg or choco install ffmpeg'));
+        }
+      }
+      cleanup();
+      resolve();
+    });
 
     ffmpeg.on('close', () => {
       cleanup();
