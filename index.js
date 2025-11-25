@@ -103,20 +103,17 @@ function playVideoAscii(url) {
 
     const ffmpegCmd = isWindows ? 'ffmpeg.exe' : 'ffmpeg';
     
-    // On Windows, use different settings for better performance
+    // Use lower FPS on Windows for better performance and stability
+    const targetFPS = isWindows ? 12 : 15;
     const ffmpegArgs = [
+      '-re', // Read input at native frame rate - critical for proper timing
       '-i', url,
-      '-vf', `scale=${width}:${height},fps=15`, // Lower FPS on Windows for stability
+      '-vf', `scale=${width}:${height},fps=${targetFPS}`,
       '-f', 'image2pipe',
       '-vcodec', 'rawvideo',
       '-pix_fmt', 'rgb24',
       '-'
     ];
-    
-    // Don't use -re flag on Windows to avoid timing issues
-    if (!isWindows) {
-      ffmpegArgs.unshift('-re');
-    }
     
     const ffmpeg = spawn(ffmpegCmd, ffmpegArgs, {
       stdio: ['ignore', 'pipe', 'ignore']
@@ -126,48 +123,60 @@ function playVideoAscii(url) {
     let buffer = Buffer.alloc(0);
     let firstFrame = true;
     let frameCount = 0;
+    
+    // Frame queue to prevent burst rendering
+    const frameQueue = [];
     let isProcessing = false;
 
     const charsetName = config.get('asciiCharset');
     const chars = CHARSETS[charsetName] || CHARSETS.standard;
     
-    // Pre-allocate output array to avoid string concatenation on Windows
-    const processFrame = (frame) => {
-      if (isProcessing) return; // Skip frame if still processing previous
-      isProcessing = true;
-      
-      setImmediate(() => {
-        if (firstFrame) {
-          console.clear();
-          process.stdout.write('\x1B[?25l');
-          firstFrame = false;
-        }
+    // Optimized frame rendering
+    const renderFrame = (frame) => {
+      if (firstFrame) {
+        console.clear();
+        process.stdout.write('\x1B[?25l');
+        firstFrame = false;
+      }
 
-        const lines = [];
-        lines.push('\x1B[H'); // Move cursor to home
-        
-        for (let y = 0; y < height; y++) {
-          let line = '';
-          for (let x = 0; x < width; x++) {
-            const offset = (y * width + x) * 3;
-            const r = frame[offset];
-            const g = frame[offset + 1];
-            const b = frame[offset + 2];
-            
-            const brightness = (r + g + b) / 3;
-            const charIndex = Math.floor((brightness / 255) * (chars.length - 1));
-            const char = chars[charIndex];
-            
-            line += `\x1b[38;2;${r};${g};${b}m${char}`;
-          }
-          lines.push(line);
+      // Use single string builder for better performance
+      let output = '\x1B[H'; // Move cursor to home
+      
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const offset = (y * width + x) * 3;
+          const r = frame[offset];
+          const g = frame[offset + 1];
+          const b = frame[offset + 2];
+          
+          const brightness = (r + g + b) / 3;
+          const charIndex = Math.floor((brightness / 255) * (chars.length - 1));
+          const char = chars[charIndex];
+          
+          output += `\x1b[38;2;${r};${g};${b}m${char}`;
         }
-        lines.push('\x1b[0m');
-        
-        process.stdout.write(lines.join('\n'));
-        isProcessing = false;
-        frameCount++;
-      });
+        output += '\n';
+      }
+      output += '\x1b[0m';
+      
+      process.stdout.write(output);
+      frameCount++;
+    };
+    
+    // Process next frame from queue
+    const processNextFrame = () => {
+      if (isProcessing || frameQueue.length === 0) return;
+      
+      isProcessing = true;
+      const frame = frameQueue.shift();
+      
+      renderFrame(frame);
+      
+      // Schedule next frame processing
+      isProcessing = false;
+      if (frameQueue.length > 0) {
+        setImmediate(processNextFrame);
+      }
     };
     
     ffmpeg.stdout.on('data', (chunk) => {
@@ -176,16 +185,56 @@ function playVideoAscii(url) {
       while (buffer.length >= frameSize) {
         const frame = buffer.subarray(0, frameSize);
         buffer = buffer.subarray(frameSize);
-        processFrame(frame);
+        
+        // Add frame to queue instead of processing immediately
+        frameQueue.push(Buffer.from(frame));
+        
+        // Keep queue size reasonable to prevent memory issues
+        if (frameQueue.length > 30) {
+          frameQueue.shift(); // Drop oldest frame if queue too large
+        }
+      }
+      
+      // Start processing if not already running
+      if (!isProcessing) {
+        processNextFrame();
       }
     });
 
+    let cleanedUp = false;
+    
     const cleanup = () => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      
+      // Restore terminal state
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(false);
+        process.stdin.pause();
+      }
+      process.stdin.removeListener('data', onKeyPress);
       if (ffmpeg && !ffmpeg.killed) ffmpeg.kill();
       if (audioPlayer && !audioPlayer.killed) audioPlayer.kill();
-      process.stdout.write('\x1B[?25h');
+      process.stdout.write('\x1B[?25h'); // Show cursor
       console.clear();
     };
+
+    // Handle keyboard input for stopping playback
+    const onKeyPress = (key) => {
+      // Ctrl+C (0x03) or 'q' to quit
+      if (key[0] === 0x03 || key.toString().toLowerCase() === 'q') {
+        cleanup();
+        // Small delay to let terminal reset before inquirer takes over
+        setTimeout(() => resolve(), 100);
+      }
+    };
+
+    // Enable raw mode to capture Ctrl+C without exiting
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.on('data', onKeyPress);
+    }
 
     ffmpeg.on('error', (err) => {
       if (err.code === 'ENOENT') {
@@ -202,13 +251,6 @@ function playVideoAscii(url) {
       cleanup();
       resolve();
     });
-
-    // Handle Ctrl+C to stop playback without killing the CLI
-    const onSigInt = () => {
-      cleanup();
-      process.removeListener('SIGINT', onSigInt);
-    };
-    process.on('SIGINT', onSigInt);
   });
 }
 
