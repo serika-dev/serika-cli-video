@@ -43,7 +43,7 @@ This will automatically configure the `serika-cli` command in your terminal.
    
    Or specify a custom API URL:
    ```bash
-   SERIKA_API_URL=https://serika.tv/api serika-cli
+   SERIKA_API_URL=https://serika.video/api serika-cli
    ```
 
 3. Select a video from the list to play it in `ffplay`.

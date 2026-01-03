@@ -29,13 +29,13 @@ const CHARSETS = {
   solid: '█'
 };
 
-const API_URL = 'https://serika.app/api';
+const API_URL = process.env.SERIKA_API_URL || 'https://serika.video/api';
 const isWindows = os.platform() === 'win32';
 
 async function fetchVideos() {
   const spinner = ora('Fetching videos from Serika...').start();
   try {
-    const response = await axios.get(`${API_URL}/videos`);
+    const response = await axios.get(`${API_URL}/videos`, { timeout: 30000 });
     spinner.stop();
     return response.data.videos;
   } catch (error) {
